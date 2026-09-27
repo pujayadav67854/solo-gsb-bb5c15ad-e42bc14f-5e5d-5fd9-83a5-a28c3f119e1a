@@ -245,6 +245,32 @@
      `created_at`，创世事件的 `giver` / `receiver` / `nonce` / `prev_hash`
      为空串。`created_from` 晚于 `created_to` 返回 **400**
      `invalid_time_range`。
+- **保管负荷报表** `GET /reports/custody-load`（**只读**，独立于交接流程，不
+  写任何表）：统计某位持有人在指定时间窗内「同时持有多少条链」的负荷。
+  1. **查询参数**：`holder`（持有人标识，必填）、`start` 与 `end`（统计窗口，
+     **半开区间 `[start, end)`**，必填）。`start` / `end` **必须携带时区**
+     （如 `2026-09-01T00:00:00+08:00` 或 `2026-09-01T00:00:00Z`），服务端
+     **统一换算为 UTC**；时间非法、缺时区、`start >= end` 或 **`end` 晚于查询
+     时刻**均返回 **400** `invalid_time_range`。
+  2. **同一读事务内固定事件快照**：先把「**当时最大的事件数据库 id**」固定为
+     `snapshot_event_id`（`MAX(events.id)`，全库无事件时为 0），随后**仅用
+     `id <= snapshot_event_id` 的事件**重建全库持有区间；报表期间新追加的移交
+     不进入本次结果。
+  3. **重建规则**：对每条链按 **`(created_at, 事件数据库 id)`** 排序事件——
+     创世事件（`seq=0`）从链条 `first_holder` 起持有，此后每条移交事件以
+     **`receiver` 接续**为新持有人；**同一时刻（同一 `created_at`）的多个变化
+     先合并**，只比较该时刻前 / 后的净状态，时刻中间的瞬时交接（如同一秒内
+     A→B→C）对 B 只产生零时长区间、**不产生任何负荷**。由此**每条链在任一时刻
+     至多计一次**；**自转交**（`receiver` 与原持有人相同）持有人不变、**不增加
+     负荷**。重建先完整还原**窗口之前**的持有状态，再把各链的半开持有区间
+     **裁剪到 `[start, end)`**。
+  4. **响应字段**：`snapshot_event_id`（本次快照）、`peak_chain_count`（窗口内
+     **最大同时持有链数**）、`peak_intervals`（达到该**正峰值**的**全部合并
+     连续区间**，半开 `[start, end)`，相邻同峰值段合并，按开始时刻升序，UTC
+     ISO-8601）、`total_chain_seconds`（**持有链数对秒数的积分**，即
+     「链·秒」；整秒为整数，窗口含亚秒精度时可为小数）。该人窗口内**无任何
+     持有记录**（或全部为零时长瞬态）时 `peak_chain_count=0`、
+     `total_chain_seconds=0`、`peak_intervals=[]`。
 
 ## 一条命令启动（依赖安装 + 数据库初始化 + 启动）
 
@@ -307,6 +333,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | `POST` | `/seals/{seal_id}/release` | 凭一次性解封码提前解封（错码 403；重复解封/已过期 409；不动哈希链） |
 | `GET`  | `/seals/{seal_id}` | 按封存 ID 查询状态（active / released / expired，不含解封码摘要） |
 | `GET`  | `/chains/{chain_id}/seal` | 查询某条链最新的封存（无封存 404 seal_not_found） |
+| `GET`  | `/reports/custody-load` | 保管负荷报表（holder/start/end；时间须带时区并转 UTC，start<end 且 end 不得晚于查询时刻，否则 400 invalid_time_range；同一读事务固定 snapshot_event_id，仅用该快照重建全库该人持有区间：创世从 first_holder 起、移交以 receiver 接续，同刻变化合并后计算，每条链任一时刻至多计一次、自转交不增负荷；先还原窗口前状态再裁剪 [start,end)；返回 peak_chain_count、全部正峰值合并连续区间 peak_intervals 与积分 total_chain_seconds；无持有记录为 0 与空区间；只读） |
 | `GET`  | `/chains/{chain_id}/verify` | 完整性校验，指出首个断裂序号 |
 | `GET`  | `/chains/{chain_id}/events/{seq}/proof` | 生成单个事件的 Merkle 包含证明（叶子绑定 chain_id/seq/event_hash；奇数层末节点复制配对；返回事件/左右兄弟路径/事件数/链尾/根/snapshot_digest；seq 越界 404 event_not_found） |
 | `POST` | `/proofs/verify` | 仅依据请求体重算叶子、路径与 snapshot_digest 离线校验，不读数据库；返回 valid 与首个失败阶段 |
@@ -344,7 +371,8 @@ cancelled / replaced / rejected / expired / terminated，或创建时未提供�
 **400** —— `too_many_seqs`（批量证明去重后超过 20 个事件序号）、
 `too_few_seqs`（批量证明未提供任何有效序号）、
 `invalid_time_range`（审计检索的 `created_from`/`created_to` 非合法 ISO-8601
-时间，或 `created_from` 晚于 `created_to`）、
+时间，或 `created_from` 晚于 `created_to`；保管负荷报表的 `start`/`end` 非
+合法 ISO-8601、**缺少时区**、`start >= end` 或 **`end` 晚于查询时刻**）、
 `role_requires_holder`（审计检索提供了 `role` 却未提供 `holder`）、
 `invalid_cursor`（审计翻页游标格式非法/版本不受支持/字段缺失）、
 `invalid_cursor_signature`（审计翻页游标签名无效：损坏、被篡改或
@@ -794,6 +822,51 @@ curl -s "http://localhost:8000/audit/events?limit=50&next_cursor=eyJmIjoi...."
 # 重新发起一次不带 next_cursor 的查询才会获得当前时刻的新快照。
 ```
 
+### 保管负荷报表示例
+
+适用于「统计某位持有人在一段时间内同时保管多少条链」的场景：报表在**同一个
+读事务**内固定事件快照，仅用该快照重建区间，只读、不改变任何交接流程。
+
+```bash
+# 1) 查询 alice 在 9 月（半开 [start, end)，UTC）的保管负荷
+curl -s "http://localhost:8000/reports/custody-load?holder=alice&\
+start=2026-09-01T00:00:00Z&end=2026-10-01T00:00:00Z"
+# {
+#   "holder": "alice",
+#   "start": "2026-09-01T00:00:00+00:00",
+#   "end": "2026-10-01T00:00:00+00:00",
+#   "snapshot_event_id": 42,
+#   "peak_chain_count": 3,
+#   "total_chain_seconds": 684000,
+#   "peak_intervals": [
+#     {"start": "2026-09-05T08:00:00+00:00", "end": "2026-09-06T02:00:00+00:00"},
+#     {"start": "2026-09-12T00:00:00+00:00", "end": "2026-09-12T06:00:00+00:00"}
+#   ]
+# }
+# 含义：同一读事务锚定到第 42 号事件；窗口内最多同时持有 3 条链；
+# 达到 3 条的连续时段共两段（相邻同峰值段已合并）；
+# 持有链数对时间积分共 684000 链·秒（=190 链·小时）。
+
+# 2) 携带非 UTC 时区：服务端自动换算（+08:00 的 08:00 即 UTC 00:00）
+curl -s "http://localhost:8000/reports/custody-load?holder=alice&\
+start=2026-09-01T08:00:00%2B08:00&end=2026-10-01T08:00:00%2B08:00"
+
+# 3) 该人窗口内从未持有（或全部为同秒瞬态）：
+# {"holder":"dave", ..., "peak_chain_count":0,
+#  "total_chain_seconds":0, "peak_intervals":[], "snapshot_event_id":42}
+
+# 4) 错误情形（均为 400 invalid_time_range）：
+#    缺时区（朴素时间） / 时间非法 / start 不早于 end / end 晚于当前时刻
+curl -i "http://localhost:8000/reports/custody-load?holder=alice&\
+start=2026-09-01T00:00:00&end=2026-10-01T00:00:00Z"
+# 400 {"error":"invalid_time_range",
+#      "detail":"start 必须携带时区偏移量（如 +08:00 或 Z），朴素时间不被接受: ..."}
+```
+
+重建语义补充：同一秒内链 A→B→C 的连续移交，B 的持有是零时长瞬态，**不贡献
+峰值与积分**；B 自转交（A→A）持有连续，**不增加负荷**；窗口开始前已在持有的
+链会正确还原并自 `start` 起计入（末段开放区间裁至 `end`）。
+
 ### 批量 Merkle multiproof（批量可选择披露）示例
 
 ```bash
@@ -920,6 +993,7 @@ curl -i "http://localhost:8000/chains/ab12.../events/proof?seq=0&seq=1&...&seq=2
 ├── app/
 │   ├── main.py        # FastAPI 路由与启动
 │   ├── audit.py       # 交接事件审计检索：快照上界翻页、过滤条件摘要与 HMAC 签名游标
+│   ├── reports.py     # 保管负荷报表：同一读事务固定事件快照，重建持有人区间、裁剪窗口并统计峰值/区间/积分（只读）
 │   ├── service.py     # 哈希链核心逻辑（创建 / 追加 / 邀约确认 / 撤销 / 原子替换 / 见证 / 争议封存 / 查询 / 校验 / Merkle 包含证明与批量 multiproof 的生成与校验）
 │   ├── merkle.py      # Merkle 包含证明纯函数：叶子/内部节点/快照摘要、单事件与批量 multiproof 的构造与离线重算（不读数据库）
 │   ├── database.py    # SQLite 连接、建表与旧 offers 表重建迁移、串行写事务

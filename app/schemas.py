@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -1206,3 +1206,60 @@ class SealOut(BaseModel):
 
 class HealthOut(BaseModel):
     status: str
+
+
+class CustodyPeakInterval(BaseModel):
+    """保管负荷达到正峰值的一个连续时间区间（半开 [start, end)，UTC ISO-8601）。"""
+
+    start: str = Field(
+        ...,
+        description="区间起点（含），UTC ISO-8601，显式 +00:00 偏移",
+    )
+    end: str = Field(
+        ...,
+        description="区间终点（不含，半开区间），UTC ISO-8601，显式 +00:00 偏移",
+    )
+
+
+class CustodyLoadReportOut(BaseModel):
+    """GET /reports/custody-load 保管负荷报表。"""
+
+    holder: str = Field(..., description="被统计的持有人标识")
+    start: str = Field(
+        ...,
+        description="统计窗口起点（含）：请求参数换算为 UTC 后的 ISO-8601",
+    )
+    end: str = Field(
+        ...,
+        description="统计窗口终点（不含，半开 [start, end)）：换算为 UTC 后的 ISO-8601",
+    )
+    snapshot_event_id: int = Field(
+        ...,
+        description=(
+            "本次报表锚定的事件快照：同一读事务内当时最大的事件数据库 id"
+            "（MAX(events.id)，全库无事件时为 0）；仅用 id <= 该值的事件重建，"
+            "报表期间新追加的移交不进入结果"
+        ),
+    )
+    peak_chain_count: int = Field(
+        ...,
+        description=(
+            "窗口 [start, end) 内该人同时持有链数的最大值（正峰值）；"
+            "窗口内从不持有时为 0"
+        ),
+    )
+    total_chain_seconds: Union[int, float] = Field(
+        ...,
+        description=(
+            "持有链数对时间（秒）的积分，即「链·秒」总量；整秒时为整数，"
+            "窗口含亚秒精度时可为小数；无任何持有时为 0"
+        ),
+    )
+    peak_intervals: list[CustodyPeakInterval] = Field(
+        ...,
+        description=(
+            "达到正峰值 peak_chain_count 的全部合并连续区间（半开 [start, end)，"
+            "相邻同峰值段已合并，按开始时刻升序，UTC ISO-8601）；"
+            "峰值为 0（无持有记录）时为空列表"
+        ),
+    )

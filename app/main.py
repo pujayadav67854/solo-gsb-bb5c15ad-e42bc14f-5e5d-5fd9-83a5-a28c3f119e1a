@@ -7,7 +7,7 @@ from typing import Literal, Optional
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 
-from . import audit, config, database
+from . import audit, config, database, reports
 from .schemas import (
     AuditEventsPage,
     BatchProofVerifyRequest,
@@ -15,6 +15,7 @@ from .schemas import (
     ChainOut,
     ChainSummary,
     CreateChainRequest,
+    CustodyLoadReportOut,
     EventBatchProofOut,
     EventProofOut,
     HandoverBatchRequest,
@@ -79,7 +80,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="文件交接留痕服务",
     description="基于 SHA-256 哈希链的多人文件交接记录、查询与完整性校验。",
-    version="1.9.0",
+    version="1.10.0",
     lifespan=lifespan,
 )
 
@@ -179,6 +180,54 @@ def api_audit_events(
             cursor=next_cursor,
         )
     )
+
+
+@app.get(
+    "/reports/custody-load",
+    response_model=CustodyLoadReportOut,
+    tags=["reports"],
+    summary="保管负荷报表：持有人在时间窗内同时持有链数的峰值、区间与积分（只读）",
+    description=(
+        "查询参数 holder（持有人标识）、start / end（统计窗口，半开区间 "
+        "**[start, end)**）。start / end **必须携带时区**（如 "
+        "2026-09-01T00:00:00+08:00 或 ...Z），服务端统一换算为 UTC；时间非法、"
+        "缺时区、start >= end 或 **end 晚于查询时刻**均返回 400 "
+        "invalid_time_range。\n\n"
+        "服务端在**同一个 SQLite 读事务**内先把「当时最大的事件数据库 id」"
+        "固定为 snapshot_event_id（全库无事件时为 0），随后**仅用该快照**"
+        "重建全库该人的持有区间：创世事件从链条 first_holder 起持有，移交事件"
+        "以 receiver 接续为新持有人，事件按 (created_at, 事件数据库 id) 排序；"
+        "**同一时刻（同一 created_at）的多个变化先合并**，只比较该时刻前后的"
+        "净状态，时刻中间的瞬时交接不产生时长——每条链在任一时刻至多计一次，"
+        "自转交（receiver 与原持有人相同）不增加负荷。重建先完整还原窗口之前"
+        "的持有状态，再把各链的半开持有区间裁剪到 [start, end)。\n\n"
+        "响应返回：peak_chain_count（窗口内最大同时持有链数）、"
+        "peak_intervals（达到该**正峰值**的全部**合并连续区间**，半开 "
+        "[start, end)，UTC ISO-8601，相邻同峰值段合并）、"
+        "total_chain_seconds（持有链数对秒数的积分，即「链·秒」，整秒为整数、"
+        "含亚秒时可为小数）。该人窗口内无任何持有记录（或全部为零时长瞬态）时"
+        "peak_chain_count=0、total_chain_seconds=0、peak_intervals 为空列表。\n\n"
+        "本报表**只读**：不追加事件、不推进链尾、不改变任何交接流程；报表期间"
+        "新追加的事件 id 均大于 snapshot_event_id，不影响本次结果。"
+    ),
+)
+def api_custody_load(
+    holder: str = Query(
+        ...,
+        min_length=1,
+        max_length=200,
+        description="被统计的持有人标识（精确匹配 chains.first_holder / events.receiver）",
+    ),
+    start: str = Query(
+        ...,
+        description="统计窗口起点（含），带时区的 ISO-8601，如 2026-09-01T00:00:00+08:00",
+    ),
+    end: str = Query(
+        ...,
+        description="统计窗口终点（不含，半开 [start, end)），带时区的 ISO-8601；不得晚于查询时刻",
+    ),
+) -> CustodyLoadReportOut:
+    return CustodyLoadReportOut(**reports.custody_load(holder, start, end))
 
 
 @app.post(
