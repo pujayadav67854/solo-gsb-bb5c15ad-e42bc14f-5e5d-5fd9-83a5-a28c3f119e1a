@@ -1206,3 +1206,64 @@ class SealOut(BaseModel):
 
 class HealthOut(BaseModel):
     status: str
+
+
+class CustodyPeakInterval(BaseModel):
+    """保管负荷达到正峰值的一个连续区间（半开 [start, end)，UTC ISO-8601）。"""
+
+    start: str = Field(
+        ...,
+        description=(
+            "峰值区间起点（UTC ISO-8601，含）：该时刻起同时持有链数达到正峰值"
+        ),
+    )
+    end: str = Field(
+        ...,
+        description=(
+            "峰值区间终点（UTC ISO-8601，不含）；相邻峰值段间只有同时刻零长度"
+            "跳变时合并为同一连续区间"
+        ),
+    )
+
+
+class CustodyLoadOut(BaseModel):
+    """GET /reports/custody-load 保管负荷报表响应。"""
+
+    holder: str = Field(..., description="本次报表统计的持有人标识（原样回显）")
+    start: str = Field(
+        ...,
+        description="统计窗口起点（UTC ISO-8601，含），由携带时区的入参转换而来"
+    )
+    end: str = Field(
+        ...,
+        description="统计窗口终点（UTC ISO-8601，不含），不晚于查询时刻"
+    )
+    snapshot_event_id: int = Field(
+        ...,
+        description=(
+            "本次报表锚定的事件快照：同一读事务内当时最大的事件数据库 id"
+            "（MAX(events.id)，全库无事件时为 0）；仅以 id 不超过该值的事件"
+            "重建持有区间，重建期间新追加的移交不影响本次结果"
+        ),
+    )
+    max_concurrent_chains: int = Field(
+        ...,
+        description=(
+            "窗口内该人同时持有的最大链数（每条链在任意时刻最多计一次，"
+            "自转交不增负荷）；无任何持有记录时为 0"
+        ),
+    )
+    peak_intervals: list[CustodyPeakInterval] = Field(
+        ...,
+        description=(
+            "达到正峰值（>0 的最大值）的全部合并连续区间；无持有记录或正峰值"
+            "为 0 时为空列表"
+        ),
+    )
+    held_chain_seconds: int | float = Field(
+        ...,
+        description=(
+            "持有链数对时间的积分（链·秒）：Σ 区间内持有链数 × 持续秒数；"
+            "整秒结果以整数给出，无持有记录时为 0"
+        ),
+    )

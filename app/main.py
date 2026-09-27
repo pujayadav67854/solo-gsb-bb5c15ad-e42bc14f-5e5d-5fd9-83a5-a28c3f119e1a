@@ -8,6 +8,7 @@ from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 
 from . import audit, config, database
+from . import reports as reports_module
 from .schemas import (
     AuditEventsPage,
     BatchProofVerifyRequest,
@@ -15,6 +16,7 @@ from .schemas import (
     ChainOut,
     ChainSummary,
     CreateChainRequest,
+    CustodyLoadOut,
     EventBatchProofOut,
     EventProofOut,
     HandoverBatchRequest,
@@ -178,6 +180,59 @@ def api_audit_events(
             limit=limit,
             cursor=next_cursor,
         )
+    )
+
+
+@app.get(
+    "/reports/custody-load",
+    response_model=CustodyLoadOut,
+    tags=["reports"],
+    summary="保管负荷报表：某持有人在时间窗口内同时持有的链数（只读快照）",
+    description=(
+        "统计指定持有人 holder 在半开时间窗口 [start, end) 内的保管负荷。"
+        "start/end 必须是**携带时区**的 ISO-8601 时间（如 "
+        "2026-09-01T00:00:00+08:00 或 2026-09-01T00:00:00Z），服务端统一转换"
+        "为 UTC；start 必须严格早于 end，end 不得晚于查询时刻，否则返回 "
+        "**400 invalid_time_range**。\n\n"
+        "服务端在**同一个 SQLite 读事务**内先把「当时最大的事件数据库 id」"
+        "固定为快照上界 snapshot_event_id（全库无事件时为 0），随后**仅以该"
+        "快照**重建该人在全库全部链上的持有区间：创世从 first_holder 开始"
+        "持有，移交以 receiver 接续；每条链的事件按 (created_at, id) 升序"
+        "处理，**先顺序还原窗口前状态，再把持有区间裁剪到 [start, end)**。"
+        "**同一时刻的变化合并后计算**（同一链同刻多事件仅以最后一条的 "
+        "receiver 为准）；**每条链任意时刻最多计一次**，**自转交"
+        "（receiver 与当前持有人相同）不增负荷**。\n\n"
+        "返回最大同时持有链数 max_concurrent_chains、达到正峰值的全部合并"
+        "连续区间 peak_intervals，以及持有链数对秒数的积分 "
+        "held_chain_seconds（链·秒）。该人在快照内没有任何持有记录时数值为 "
+        "0、peak_intervals 为空。本接口只读：不追加事件、不推进链尾，不改变"
+        "任何交接流程。"
+    ),
+)
+def api_custody_load(
+    holder: str = Query(
+        ...,
+        min_length=1,
+        max_length=200,
+        description="持有人标识（精确匹配，按创世 first_holder 与各次移交 receiver 重建）",
+    ),
+    start: str = Query(
+        ...,
+        description=(
+            "统计窗口起点（含），ISO-8601 且必须携带时区偏移，"
+            "如 2026-09-01T00:00:00+08:00"
+        ),
+    ),
+    end: str = Query(
+        ...,
+        description=(
+            "统计窗口终点（不含），ISO-8601 且必须携带时区偏移；"
+            "不得晚于查询时刻（UTC）"
+        ),
+    ),
+) -> CustodyLoadOut:
+    return CustodyLoadOut(
+        **reports_module.custody_load_report(holder=holder, start=start, end=end)
     )
 
 

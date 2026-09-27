@@ -159,6 +159,21 @@ current_holder 不符 -> holder_mismatch；链尾 tail_hash 不符 ->
 tail_mismatch；四项全部一致 -> matched。逐项状态按上述顺序取首个不符项，
 结果严格保持输入顺序，matched_count 统计 matched 条数。本接口**只读**：
 不追加任何事件、不推进任何链尾、不写任何表。
+
+保管负荷报表（GET /reports/custody-load）
+-----------------------------------------
+独立的只读报表模块（实现位于 reports.py），复用本模块的 ChainError 但不
+接入任何交接写流程。入参 holder / start / end：start、end 必须携带时区
+（显式偏移），统一转 UTC；start < end 且 end 不晚于查询时刻，否则 400
+invalid_time_range；统计窗口为半开 [start, end)。服务端在**同一个 SQLite
+读事务**内先固定 MAX(events.id) 为 snapshot_event_id（空库为 0），随后
+仅以 id <= 该值的事件集合重建 holder 在全库各链上的持有区间：创世从
+chains.first_holder 起，移交以 events.receiver 接续，事件按 (created_at,
+id) 排序；先还原窗口前状态，再把各链区间裁剪到 [start, end)。同一时刻的
+变化合并后计算（同刻多事件仅以最后一条的 receiver 决胜）；每条链任意时刻
+最多计一次；自转交（receiver 与当前持有人相同）不增负荷。返回最大同时持有
+链数、达到正峰值的全部合并连续区间与持有链数对秒数的积分（链·秒）；该人
+无任何持有记录时数值为 0、区间为空。
 """
 from __future__ import annotations
 
